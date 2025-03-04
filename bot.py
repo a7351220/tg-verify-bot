@@ -18,6 +18,9 @@ TYPING_INVITE_CODE = 1
 # 存儲待審核用戶
 pending_users = {}
 
+# 存儲有效的邀請碼
+valid_invite_codes = set()
+
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -57,10 +60,87 @@ async def start_verification(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     return TYPING_INVITE_CODE
 
+async def add_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 檢查是否是管理員
+    if str(update.effective_user.id) != os.getenv('ADMIN_ID'):
+        await update.message.reply_text("❌ 只有管理員可以使用此命令")
+        return
+    
+    # 檢查是否有提供邀請碼
+    if not context.args:
+        await update.message.reply_text(
+            "❌ 請提供邀請碼\n"
+            "格式：/add_codes code1 code2 code3"
+        )
+        return
+    
+    # 添加邀請碼
+    added_codes = []
+    for code in context.args:
+        if code not in valid_invite_codes:
+            valid_invite_codes.add(code)
+            added_codes.append(code)
+    
+    # 回覆結果
+    if added_codes:
+        await update.message.reply_text(
+            f"✅ 已添加 {len(added_codes)} 個邀請碼：\n" + 
+            "\n".join(f"🎫 {code}" for code in added_codes)
+        )
+    else:
+        await update.message.reply_text("❌ 沒有新的邀請碼被添加")
+
+async def list_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 檢查是否是管理員
+    if str(update.effective_user.id) != os.getenv('ADMIN_ID'):
+        await update.message.reply_text("❌ 只有管理員可以使用此命令")
+        return
+    
+    # 顯示所有有效的邀請碼
+    if not valid_invite_codes:
+        await update.message.reply_text("📝 目前沒有可用的邀請碼")
+        return
+    
+    codes_list = "📋 可用的邀請碼列表：\n\n" + "\n".join(f"🎫 {code}" for code in valid_invite_codes)
+    await update.message.reply_text(codes_list)
+
 async def handle_invite_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     invite_code = update.message.text
     user = update.effective_user
     
+    # 檢查是否是有效的邀請碼
+    if invite_code in valid_invite_codes:
+        try:
+            # 生成邀請連結
+            invite_link = await context.bot.create_chat_invite_link(
+                chat_id=os.getenv('GROUP_ID'),
+                member_limit=1
+            )
+            
+            # 發送邀請連結給用戶
+            await update.message.reply_text(
+                "🎉 邀請碼驗證通過！\n\n"
+                f"🔗 這是您的群組邀請連結：\n{invite_link.invite_link}\n\n"
+                "⚠️ 請注意：此連結僅能使用一次"
+            )
+            
+            # 移除已使用的邀請碼
+            valid_invite_codes.remove(invite_code)
+            
+            # 記錄到日誌
+            logging.info(f"User {user.username} (ID: {user.id}) used invite code: {invite_code}")
+            
+            return ConversationHandler.END
+            
+        except Exception as e:
+            logging.error(f"Error creating invite link: {e}")
+            # 如果出錯，保留邀請碼
+            await update.message.reply_text(
+                "❌ 抱歉，生成邀請連結時出現錯誤，請稍後再試或聯繫管理員"
+            )
+            return ConversationHandler.END
+    
+    # 如果不是有效邀請碼，走原來的審核流程
     # 存儲用戶資訊
     pending_users[user.id] = {
         'username': user.username,
@@ -198,6 +278,66 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
+async def approve_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 檢查是否是管理員
+    if str(update.effective_user.id) != os.getenv('ADMIN_ID'):
+        await update.message.reply_text("❌ 只有管理員可以使用此命令")
+        return
+    
+    # 檢查是否有提供邀請碼
+    if not context.args:
+        await update.message.reply_text(
+            "❌ 請提供要批准的邀請碼\n"
+            "格式：/approve_codes code1 code2 code3"
+        )
+        return
+    
+    valid_codes = set(context.args)
+    approved_count = 0
+    not_found = []
+    
+    # 找出所有匹配邀請碼的用戶
+    for user_id, info in list(pending_users.items()):  # 使用 list() 因為我們會修改字典
+        if info['invite_code'] in valid_codes:
+            try:
+                # 生成邀請連結
+                invite_link = await context.bot.create_chat_invite_link(
+                    chat_id=os.getenv('GROUP_ID'),
+                    member_limit=1
+                )
+                
+                # 發送邀請連結給用戶
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        "🎉 恭喜！您的驗證請求已通過！\n\n"
+                        f"🔗 這是您的群組邀請連結：\n{invite_link.invite_link}\n\n"
+                        "⚠️ 請注意：此連結僅能使用一次"
+                    )
+                )
+                
+                # 從待審核列表中移除
+                del pending_users[user_id]
+                approved_count += 1
+                
+                # 記錄到日誌
+                logging.info(f"Approved user {info['username']} (ID: {user_id}) with invite code: {info['invite_code']}")
+                
+            except Exception as e:
+                logging.error(f"Error approving user {user_id}: {e}")
+        
+    # 檢查哪些邀請碼沒有找到對應用戶
+    for code in valid_codes:
+        if not any(info['invite_code'] == code for info in pending_users.values()):
+            not_found.append(code)
+    
+    # 生成結果消息
+    result_message = f"✅ 已批准 {approved_count} 個用戶\n"
+    if not_found:
+        result_message += f"\n❌ 這些邀請碼沒有找到對應的待審核用戶：\n" + "\n".join(f"🎫 {code}" for code in not_found)
+    
+    await update.message.reply_text(result_message)
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logging.error(f"Error occurred: {context.error}")
 
@@ -217,6 +357,9 @@ if __name__ == '__main__':
     # Add handlers
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('pending', list_pending))
+    application.add_handler(CommandHandler('add_codes', add_codes))
+    application.add_handler(CommandHandler('list_codes', list_codes))
+    application.add_handler(CommandHandler('approve_codes', approve_codes))
     application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_error_handler(error_handler)
