@@ -1,7 +1,12 @@
 import logging
 import os
 import asyncio
+import random
+import io
 from datetime import datetime
+from collections import deque, defaultdict
+from time import time
+from PIL import Image, ImageDraw, ImageFont
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, 
@@ -13,7 +18,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # 定義對話狀態
-TYPING_INVITE_CODE = 1
+TYPING_CAPTCHA = 1
+TYPING_INVITE_CODE = 2
 
 # 存儲待審核用戶
 pending_users = {}
@@ -21,11 +27,76 @@ pending_users = {}
 # 存儲有效的邀請碼
 valid_invite_codes = set()
 
+# 存儲驗證碼
+captcha_codes = {}
+
+# 添加用戶嘗試次數限制
+user_attempts = defaultdict(int)
+attempt_timestamps = defaultdict(float)
+MAX_ATTEMPTS = 3
+ATTEMPT_RESET_TIME = 3600  # 1小時
+
+# 添加請求頻率限制
+user_requests = defaultdict(lambda: deque(maxlen=MAX_REQUESTS))
+REQUEST_WINDOW = 60  # 60秒
+MAX_REQUESTS = 5  # 每個時間窗口最大請求數
+
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+
+async def check_rate_limit(user_id: int) -> bool:
+    current_time = time()
+    user_requests[user_id].append(current_time)
+    
+    if len(user_requests[user_id]) < MAX_REQUESTS:
+        return True
+    
+    # 檢查最早的請求是否在時間窗口外
+    oldest_request = user_requests[user_id][0]
+    return (current_time - oldest_request) > REQUEST_WINDOW
+
+async def check_attempts(user_id: int) -> tuple[bool, str]:
+    current_time = time()
+    
+    # 檢查是否需要重置嘗試次數
+    if current_time - attempt_timestamps[user_id] > ATTEMPT_RESET_TIME:
+        user_attempts[user_id] = 0
+        attempt_timestamps[user_id] = current_time
+    
+    if user_attempts[user_id] >= MAX_ATTEMPTS:
+        remaining_time = int(ATTEMPT_RESET_TIME - (current_time - attempt_timestamps[user_id]))
+        return False, f"❌ 您已超過最大嘗試次數，請在 {remaining_time//60} 分鐘後再試"
+    
+    return True, ""
+
+async def generate_captcha():
+    # 生成 4 位數字驗證碼
+    code = ''.join(random.choices('0123456789', k=4))
+    
+    # 創建圖片
+    img = Image.new('RGB', (100, 40), color='white')
+    draw = ImageDraw.Draw(img)
+    
+    # 添加干擾線
+    for i in range(5):
+        x1 = random.randint(0, 100)
+        y1 = random.randint(0, 40)
+        x2 = random.randint(0, 100)
+        y2 = random.randint(0, 40)
+        draw.line([(x1, y1), (x2, y2)], fill='gray')
+    
+    # 寫入數字
+    draw.text((20, 10), code, fill='black')
+    
+    # 轉換為 bytes
+    img_byte_arr = io.BytesIO()
+    img.save(img_byte_arr, format='PNG')
+    img_byte_arr.seek(0)
+    
+    return code, img_byte_arr
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != 'private':
@@ -54,13 +125,71 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start_verification(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    user = query.from_user
     await query.answer()
     
-    # 要求用戶輸入邀請碼
-    await query.edit_message_text(
-        "請輸入您的邀請碼：",
-        reply_markup=None
+    # 檢查請求頻率
+    if not await check_rate_limit(user.id):
+        await query.edit_message_text("❌ 請求過於頻繁，請稍後再試")
+        return ConversationHandler.END
+    
+    # 檢查嘗試次數
+    can_attempt, message = await check_attempts(user.id)
+    if not can_attempt:
+        await query.edit_message_text(message)
+        return ConversationHandler.END
+    
+    # 生成驗證碼
+    code, img_bytes = await generate_captcha()
+    captcha_codes[user.id] = code
+    
+    # 發送驗證碼圖片
+    await context.bot.send_photo(
+        chat_id=user.id,
+        photo=img_bytes,
+        caption="請先輸入圖片中的驗證碼："
     )
+    
+    return TYPING_CAPTCHA
+
+async def handle_captcha(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    captcha_input = update.message.text
+    
+    # 驗證碼檢查
+    if user.id not in captcha_codes or captcha_input != captcha_codes[user.id]:
+        user_attempts[user.id] += 1
+        del captcha_codes[user.id]  # 清除驗證碼
+        
+        # 檢查是否達到最大嘗試次數
+        can_attempt, message = await check_attempts(user.id)
+        if not can_attempt:
+            await update.message.reply_text(message)
+            return ConversationHandler.END
+        
+        # 創建開始按鈕和幫助按鈕
+        keyboard = [
+            [InlineKeyboardButton("🎫 開始驗證", callback_data="start_verify")],
+            [InlineKeyboardButton("❓ 查看指令說明", callback_data="show_help")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # 發送錯誤消息並返回開始畫面
+        await update.message.reply_text(
+            "❌ 驗證碼錯誤，請重新開始\n\n"
+            "🔹 本群組需要驗證才能加入\n"
+            "🔹 請準備好您的邀請碼\n"
+            "🔹 完成驗證後會收到群組邀請連結\n\n"
+            "準備好了嗎？點擊下方按鈕開始驗證！",
+            reply_markup=reply_markup
+        )
+        return ConversationHandler.END
+    
+    # 清除驗證碼
+    del captcha_codes[user.id]
+    
+    # 要求輸入邀請碼
+    await update.message.reply_text("請輸入您的邀請碼：")
     return TYPING_INVITE_CODE
 
 async def add_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -430,6 +559,7 @@ if __name__ == '__main__':
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(start_verification, pattern='^start_verify$')],
         states={
+            TYPING_CAPTCHA: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_captcha)],
             TYPING_INVITE_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_invite_code)]
         },
         fallbacks=[CommandHandler('cancel', cancel)]
