@@ -15,6 +15,9 @@ load_dotenv()
 # 定義對話狀態
 TYPING_INVITE_CODE = 1
 
+# 存儲待審核用戶
+pending_users = {}
+
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -58,6 +61,14 @@ async def handle_invite_code(update: Update, context: ContextTypes.DEFAULT_TYPE)
     invite_code = update.message.text
     user = update.effective_user
     
+    # 存儲用戶資訊
+    pending_users[user.id] = {
+        'username': user.username,
+        'first_name': user.first_name,
+        'invite_code': invite_code,
+        'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    }
+    
     # 創建審核按鈕
     keyboard = [
         [
@@ -90,9 +101,50 @@ async def handle_invite_code(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     return ConversationHandler.END
 
+async def list_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 檢查是否是管理員
+    if str(update.effective_user.id) != os.getenv('ADMIN_ID'):
+        await update.message.reply_text("❌ 只有管理員可以使用此命令")
+        return
+    
+    if not pending_users:
+        await update.message.reply_text("📝 目前沒有待審核的用戶")
+        return
+    
+    # 生成待審核用戶列表
+    message = "📋 待審核用戶列表：\n\n"
+    for user_id, info in pending_users.items():
+        message += (
+            f"👤 用戶: @{info['username']}\n"
+            f"📌 ID: {user_id}\n"
+            f"👋 名稱: {info['first_name']}\n"
+            f"🎫 邀請碼: {info['invite_code']}\n"
+            f"⏰ 時間: {info['time']}\n"
+            "➖➖➖➖➖➖➖➖➖➖\n"
+        )
+    
+    # 添加導出邀請碼按鈕
+    keyboard = [[InlineKeyboardButton("📥 導出邀請碼列表", callback_data="export_codes")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(message, reply_markup=reply_markup)
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
+    if query.data == "export_codes":
+        if not pending_users:
+            await query.edit_message_text("📝 目前沒有待審核的用戶")
+            return
+        
+        # 生成純邀請碼列表
+        codes_list = "📥 邀請碼列表：\n\n"
+        for info in pending_users.values():
+            codes_list += f"🎫 {info['invite_code']}\n"
+        
+        await query.message.reply_text(codes_list)
+        return
     
     action, user_id = query.data.split('_')
     user_id = int(user_id)
@@ -118,6 +170,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             text=f"{query.message.text}\n\n✅ 已通過 - 管理員已審核"
         )
+        
+        # 從待審核列表中移除
+        if user_id in pending_users:
+            del pending_users[user_id]
     
     elif action == "reject":
         # 通知用戶
@@ -130,6 +186,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             text=f"{query.message.text}\n\n❌ 已拒絕 - 管理員已審核"
         )
+        
+        # 從待審核列表中移除
+        if user_id in pending_users:
+            del pending_users[user_id]
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -156,6 +216,7 @@ if __name__ == '__main__':
     
     # Add handlers
     application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('pending', list_pending))
     application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_error_handler(error_handler)
