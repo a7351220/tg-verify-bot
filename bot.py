@@ -31,8 +31,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != 'private':
         return
     
-    # 創建開始按鈕
-    keyboard = [[InlineKeyboardButton("🎫 開始驗證", callback_data="start_verify")]]
+    # 創建開始按鈕和幫助按鈕
+    keyboard = [
+        [InlineKeyboardButton("🎫 開始驗證", callback_data="start_verify")],
+        [InlineKeyboardButton("❓ 查看指令說明", callback_data="show_help")]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     # 發送歡迎消息
@@ -213,6 +216,57 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
+    if query.data == "show_help":
+        is_admin = str(query.from_user.id) == os.getenv('ADMIN_ID')
+        
+        help_text = (
+            "📚 可用的指令列表：\n\n"
+            "一般用戶指令：\n"
+            "➖➖➖➖➖➖➖➖➖➖\n"
+            "/start - 開始使用機器人\n"
+            "/help - 顯示此幫助訊息\n"
+            "/cancel - 取消當前操作\n\n"
+        )
+        
+        if is_admin:
+            help_text += (
+                "管理員指令：\n"
+                "➖➖➖➖➖➖➖➖➖➖\n"
+                "/pending - 查看待審核的用戶列表\n"
+                "/approve_codes - 批量批准指定邀請碼的用戶\n"
+                "格式：/approve_codes code1 code2 code3\n\n"
+                "💡 提示：\n"
+                "• 在待審核列表中可以導出純邀請碼列表\n"
+                "• 可以對單個用戶進行審核或拒絕\n"
+                "• 也可以使用 /approve_codes 批量處理"
+            )
+        
+        # 添加返回按鈕
+        keyboard = [[InlineKeyboardButton("🔙 返回", callback_data="back_to_start")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(help_text, reply_markup=reply_markup)
+        return
+    
+    if query.data == "back_to_start":
+        # 返回開始界面
+        keyboard = [
+            [InlineKeyboardButton("🎫 開始驗證", callback_data="start_verify")],
+            [InlineKeyboardButton("❓ 查看指令說明", callback_data="show_help")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        welcome_message = (
+            "👋 歡迎來到驗證機器人！\n\n"
+            "🔹 本群組需要驗證才能加入\n"
+            "🔹 請準備好您的邀請碼\n"
+            "🔹 完成驗證後會收到群組邀請連結\n\n"
+            "準備好了嗎？點擊下方按鈕開始驗證！"
+        )
+        
+        await query.edit_message_text(welcome_message, reply_markup=reply_markup)
+        return
+    
     if query.data == "export_codes":
         if not pending_users:
             await query.edit_message_text("📝 目前沒有待審核的用戶")
@@ -338,6 +392,33 @@ async def approve_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(result_message)
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    is_admin = str(update.effective_user.id) == os.getenv('ADMIN_ID')
+    
+    help_text = (
+        "📚 可用的指令列表：\n\n"
+        "一般用戶指令：\n"
+        "➖➖➖➖➖➖➖➖➖➖\n"
+        "/start - 開始使用機器人\n"
+        "/help - 顯示此幫助訊息\n"
+        "/cancel - 取消當前操作\n\n"
+    )
+    
+    if is_admin:
+        help_text += (
+            "管理員指令：\n"
+            "➖➖➖➖➖➖➖➖➖➖\n"
+            "/pending - 查看待審核的用戶列表\n"
+            "/approve_codes - 批量批准指定邀請碼的用戶\n"
+            "格式：/approve_codes code1 code2 code3\n\n"
+            "💡 提示：\n"
+            "• 在待審核列表中可以導出純邀請碼列表\n"
+            "• 可以對單個用戶進行審核或拒絕\n"
+            "• 也可以使用 /approve_codes 批量處理"
+        )
+    
+    await update.message.reply_text(help_text)
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logging.error(f"Error occurred: {context.error}")
 
@@ -356,6 +437,7 @@ if __name__ == '__main__':
     
     # Add handlers
     application.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('help', help_command))
     application.add_handler(CommandHandler('pending', list_pending))
     application.add_handler(CommandHandler('add_codes', add_codes))
     application.add_handler(CommandHandler('list_codes', list_codes))
